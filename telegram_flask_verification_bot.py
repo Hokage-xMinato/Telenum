@@ -3,7 +3,7 @@
 import os
 import logging
 import json
-import asyncio # Import asyncio for managing the event loop
+import asyncio # Keep asyncio for handlers, but remove direct startup calls
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -40,6 +40,7 @@ PORT = int(os.getenv("PORT", 5000))
 app = Flask(__name__)
 
 # --- python-telegram-bot Application Setup ---
+# Initialize the Application without directly running set_webhook here.
 application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
 
 # Dictionary to store pending join requests awaiting verification.
@@ -222,6 +223,10 @@ application.add_handler(MessageHandler(filters.TEXT & filters.PRIVATE, fallback_
 # --- Flask Webhook Route ---
 @app.route('/webhook', methods=['POST'])
 async def webhook():
+    """
+    This is the Flask endpoint that Telegram sends updates to.
+    It receives the JSON update, creates a telegram.Update object, and processes it.
+    """
     if request.method == "POST":
         update_data = request.get_json()
         if update_data:
@@ -232,59 +237,43 @@ async def webhook():
         return jsonify({"status": "ok"}), 200
     return jsonify({"status": "Method Not Allowed"}), 405
 
-# --- GLOBAL WEBHOOK SETUP (Crucial for Gunicorn deployment) ---
-# This async function will set the webhook.
-# It runs when the module is first imported by Gunicorn.
-async def setup_webhook_if_needed():
+# --- NEW: Flask Endpoint for Setting Webhook ---
+@app.route('/set_webhook', methods=['GET'])
+async def set_webhook_route():
+    """
+    A simple GET endpoint to manually set the Telegram webhook.
+    Visit this URL in your browser AFTER your Render service is deployed and running.
+    """
     if not BOT_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Bot cannot start.")
-        # In a production environment, you might want to raise an exception to halt deployment.
-        # raise ValueError("TELEGRAM_BOT_TOKEN not set")
-        return # Exit early if token is missing
+        return jsonify({"status": "error", "message": "BOT_TOKEN environment variable not set."}), 500
+    if not WEBHOOK_URL:
+        return jsonify({"status": "error", "message": "WEBHOOK_URL not determined. Ensure RENDER_EXTERNAL_HOSTNAME is set or for local dev, WEBHOOK_URL in .env."}), 500
 
-    if not ADMIN_CHAT_ID:
-        logger.warning("ADMIN_CHAT_ID environment variable is not set. Admin notifications will be skipped.")
+    logger.info(f"Attempting to set Telegram webhook to: {WEBHOOK_URL}")
     try:
-        _ = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
-    except ValueError:
-        logger.warning(f"ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
-
-    if WEBHOOK_URL and RENDER_EXTERNAL_HOSTNAME:
-        logger.info(f"Attempting to set Telegram webhook to: {WEBHOOK_URL}")
-        try:
-            # Clear any old webhooks
-            await application.bot.set_webhook(url="")
-            # Set the new webhook
-            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-            logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
-        except Exception as e:
-            logger.error(f"Failed to set Telegram webhook: {e}. Check your BOT_TOKEN and WEBHOOK_URL.")
-            # This is a critical error, likely means the bot won't receive updates.
-            # You might want to crash the application if this fails in production.
-            # raise RuntimeError(f"Webhook setup failed: {e}")
-    else:
-        logger.info("Not on Render, or RENDER_EXTERNAL_HOSTNAME not available. Skipping automatic webhook setup.")
-        logger.info("For local testing, ensure you manually expose your Flask app (e.g., with ngrok) "
-                    "and set the webhook via a separate script or curl if needed.")
-
-# Execute webhook setup when the module is loaded (e.g., by Gunicorn)
-# This handles running an async function in a sync context at startup.
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError: # This handles cases where no event loop is currently running
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-# Check if the loop is already running before trying to run_until_complete
-# This prevents an error if gevent itself has already started the loop.
-if not loop.is_running():
-    loop.run_until_complete(setup_webhook_if_needed())
-else:
-    logger.warning("Event loop is already running. Webhook setup might have been attempted elsewhere "
-                   "or needs a different synchronization method. Ensure webhook is properly configured.")
+        # Clear any old webhooks
+        await application.bot.set_webhook(url="")
+        # Set the new webhook
+        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
+        return jsonify({"status": "success", "message": f"Webhook set to {WEBHOOK_URL}"}), 200
+    except Exception as e:
+        logger.error(f"Failed to set Telegram webhook: {e}. Check your BOT_TOKEN and WEBHOOK_URL.")
+        return jsonify({"status": "error", "message": f"Failed to set webhook: {e}"}), 500
 
 # --- Flask Server Startup (for local development only) ---
 if __name__ == "__main__":
+    if not BOT_TOKEN:
+        print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN environment variable is not set. Bot cannot start locally.")
+        exit(1)
+    
+    if not ADMIN_CHAT_ID:
+        print("WARNING: ADMIN_CHAT_ID environment variable is not set. Admin notifications will be skipped.")
+    try:
+        _ = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
+    except ValueError:
+        print(f"WARNING: ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
+
     logger.info(f"Flask app starting for local development on port {PORT}...")
     # This `app.run()` only executes if the script is run directly (not via Gunicorn).
     # Gunicorn handles the server startup on Render.
