@@ -23,84 +23,30 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Configuration Variables ---
+# --- Configuration Variables (Global for easy access by Flask routes) ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
-# Determine WEBHOOK_URL based on Render environment or .env
-# RENDER_EXTERNAL_HOSTNAME is provided by Render.com
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if RENDER_EXTERNAL_HOSTNAME:
     WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
 else:
-    # Fallback for local development or if not on Render
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://127.0.0.1:5000/webhook")
     logger.warning("RENDER_EXTERNAL_HOSTNAME not found, falling back to WEBHOOK_URL from .env or default for local testing.")
 
 PORT = int(os.getenv("PORT", 5000))
 
-# --- Flask App Initialization ---
-app = Flask(__name__)
-
-# --- python-telegram-bot Application Setup ---
-# Build the application instance. We will configure webhook in post_init callback.
-application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
+# --- Global Application Instance (will be initialized by create_application) ---
+# Initialize as None, then populate in create_application function
+application = None 
 
 # Dictionary to store pending join requests awaiting verification.
-# For a production bot, consider using a database (like Redis or PostgreSQL) for persistence.
 pending_join_requests = {}
 
-# --- Callbacks for Application Lifecycle ---
-
-async def post_init_callback(application: Application) -> None:
-    """
-    Callback function that runs once after the Application has been initialized.
-    Used to set the Telegram webhook automatically.
-    """
-    logger.info("Running post_init_callback: Setting Telegram webhook...")
-    if not BOT_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
-        return
-
-    if not WEBHOOK_URL:
-        logger.critical("WEBHOOK_URL not determined. Cannot set webhook automatically.")
-        return
-
-    try:
-        # Clear any old webhooks first to avoid conflicts
-        await application.bot.set_webhook(url="")
-        logger.info("Cleared any old webhooks successfully.")
-
-        # Set the new webhook
-        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-        logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
-        # In a production environment, you might want to raise an exception here
-        # to prevent the service from starting incorrectly without a webhook.
-
-async def post_shutdown_callback(application: Application) -> None:
-    """
-    Callback function that runs once before the Application shuts down.
-    Used to clear the Telegram webhook. (Good practice for clean shutdowns)
-    """
-    logger.info("Running post_shutdown_callback: Clearing Telegram webhook...")
-    try:
-        await application.bot.set_webhook(url="")
-        logger.info("Telegram webhook cleared successfully on shutdown.")
-    except Exception as e:
-        logger.error(f"Failed to clear Telegram webhook in post_shutdown: {e}", exc_info=True)
-
-# Register the lifecycle callbacks
-application.post_init(post_init_callback)
-application.post_shutdown(post_shutdown_callback)
-
 # --- Telegram Bot Handlers (Logic) ---
+# These functions remain mostly the same, as they are now used by the `application` object.
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles the /start command. Sends a welcome message.
-    """
     user = update.effective_user
     if user:
         await update.message.reply_html(
@@ -112,9 +58,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Received start command without effective user.")
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles new chat join requests. Stores the request and prompts for verification in DM.
-    """
     chat_join_request = update.chat_join_request
     user = chat_join_request.from_user
     chat = chat_join_request.chat
@@ -159,10 +102,6 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles when a user shares their contact (phone number) with the bot.
-    Approves the pending join request if one exists for this user and sends details to admin.
-    """
     message = update.message
     user = message.from_user
     contact = message.contact
@@ -244,9 +183,6 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    A generic message handler for any text message received in private chat.
-    """
     user = update.effective_user
     if user and user.id in pending_join_requests:
         await update.message.reply_text(
@@ -263,27 +199,84 @@ async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT
     else:
         logger.warning("Received a message without effective user in fallback handler.")
 
-# --- Register Handlers with python-telegram-bot Application ---
-application.add_handler(CommandHandler("start", start))
-application.add_handler(ChatJoinRequestHandler(handle_join_request))
-application.add_handler(MessageHandler(filters.CONTACT & ChatType.PRIVATE, handle_contact_shared))
-application.add_handler(MessageHandler(filters.TEXT & ChatType.PRIVATE, fallback_message_handler))
+# --- Callbacks for Application Lifecycle ---
+
+async def post_init_callback(application_instance: Application) -> None: # Renamed param for clarity
+    """
+    Callback function that runs once after the Application has been initialized.
+    Used to set the Telegram webhook automatically.
+    """
+    logger.info("Running post_init_callback: Setting Telegram webhook...")
+    if not BOT_TOKEN:
+        logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
+        return
+
+    if not WEBHOOK_URL:
+        logger.critical("WEBHOOK_URL not determined. Cannot set webhook automatically.")
+        return
+
+    try:
+        # Clear any old webhooks first to avoid conflicts
+        await application_instance.bot.set_webhook(url="")
+        logger.info("Cleared any old webhooks successfully.")
+
+        # Set the new webhook
+        await application_instance.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
+
+async def post_shutdown_callback(application_instance: Application) -> None: # Renamed param for clarity
+    """
+    Callback function that runs once before the Application shuts down.
+    Used to clear the Telegram webhook. (Good practice for clean shutdowns)
+    """
+    logger.info("Running post_shutdown_callback: Clearing Telegram webhook...")
+    try:
+        await application_instance.bot.set_webhook(url="")
+        logger.info("Telegram webhook cleared successfully on shutdown.")
+    except Exception as e:
+        logger.error(f"Failed to clear Telegram webhook in post_shutdown: {e}", exc_info=True)
+
+
+# --- Function to Create and Configure the PTB Application ---
+# This is the "factory" function that Gunicorn will call implicitly.
+def create_application() -> Application:
+    """
+    Creates and configures the python-telegram-bot Application instance.
+    """
+    if not BOT_TOKEN:
+        logger.critical("BOT_TOKEN is not set. Cannot create PTB Application.")
+        raise ValueError("BOT_TOKEN is not set. Please configure it in environment variables.")
+
+    # Build the application instance
+    ptb_application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
+
+    # Register the lifecycle callbacks
+    ptb_application.post_init(post_init_callback)
+    ptb_application.post_shutdown(post_shutdown_callback)
+
+    # Register handlers
+    ptb_application.add_handler(CommandHandler("start", start))
+    ptb_application.add_handler(ChatJoinRequestHandler(handle_join_request))
+    ptb_application.add_handler(MessageHandler(filters.CONTACT & ChatType.PRIVATE, handle_contact_shared))
+    ptb_application.add_handler(MessageHandler(filters.TEXT & ChatType.PRIVATE, fallback_message_handler))
+
+    return ptb_application
+
+# Initialize the global application instance
+# This is called once when the module is loaded by Gunicorn.
+application = create_application()
+
 
 # --- Flask Webhook Route ---
 @app.route('/webhook', methods=['POST'])
 async def webhook():
-    """
-    This is the Flask endpoint that Telegram sends updates to.
-    It receives the JSON update and passes it to application.update_queue.
-    """
     if request.method == "POST":
         try:
             update_data_json = request.get_data().decode('utf-8')
-            # logger.info(f"Received raw webhook update: {update_data_json[:200]}...") # Log first 200 chars
-
-            # Put the update into PTB's queue for processing.
+            # Use the global 'application' instance here
             await application.update_queue.put(Update.de_json(json.loads(update_data_json), application.bot))
-
             return jsonify({"status": "ok"}), 200
         except Exception as e:
             logger.error(f"Error processing webhook update: {e}", exc_info=True)
@@ -293,13 +286,8 @@ async def webhook():
 # --- Optional: Root Route for Flask (for health checks) ---
 @app.route('/', methods=['GET'])
 def root_route():
-    """
-    Handles GET requests to the root URL (/).
-    Provides a simple status message for the web service.
-    """
     status_message = "Telegram Bot Webhook Listener is Live and Operational!"
     logger.info(f"Root route accessed. Status: {status_message}")
-    # Return plain text status, Render expects a 200 OK response for healthy service
     return status_message, 200
 
 # --- Flask Server Startup (for local development ONLY) ---
@@ -311,26 +299,24 @@ if __name__ == "__main__":
     if not ADMIN_CHAT_ID:
         print("WARNING: ADMIN_CHAT_ID environment variable is not set. Admin notifications will be skipped.")
     try:
-        # Attempt to convert to int to catch non-numeric IDs early
         _ = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
     except ValueError:
         print(f"WARNING: ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
 
     logger.info("Starting local development server with PTB Application...")
 
-    # This manually starts PTB's webhook server for local development.
-    # On Render, Gunicorn handles the server, and PTB's Application callbacks handle the webhook setting.
     async def run_local_webhook_server():
-        # Clear any existing webhooks for local testing
+        # Use the global 'application' instance created by create_application()
         await application.bot.set_webhook(url="")
         logger.info("Cleared any existing webhooks for local testing.")
 
-        # Run PTB's webhook server locally
+        webserver_port = PORT
+        logger.info(f"Local webserver for PTB starting on port {webserver_port}...")
         await application.run_webhook(
             listen="0.0.0.0",
-            port=PORT,
+            port=webserver_port,
             url_path="/webhook",
-            webhook_url=WEBHOOK_URL # For local testing, this is typically your ngrok URL
+            webhook_url=WEBHOOK_URL
         )
 
     try:
