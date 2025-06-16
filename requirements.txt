@@ -1,6 +1,5 @@
 Flask
-python-telegram-bot==22.1
+python-telegram-bot==22.1 # Or your exact version
 python-dotenv
 gunicorn
 gevent
-geventwebsocket
