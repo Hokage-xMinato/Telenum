@@ -3,14 +3,13 @@
 import os
 import logging
 import json
-import asyncio
+import asyncio # Still needed for async handlers
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, ChatJoinRequestHandler, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
-# Import ChatType specifically
 from telegram.ext.filters import ChatType # Explicitly import ChatType
 
 # --- Load Environment Variables ---
@@ -42,6 +41,7 @@ PORT = int(os.getenv("PORT", 5000))
 app = Flask(__name__)
 
 # --- python-telegram-bot Application Setup ---
+# Build the application instance. We don't call run_polling or run_webhook here directly.
 application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
 
 # Dictionary to store pending join requests awaiting verification.
@@ -218,28 +218,37 @@ async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT
 # --- Register Handlers with python-telegram-bot Application ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(ChatJoinRequestHandler(handle_join_request))
-# Corrected filter: filters.ChatType.PRIVATE
-application.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, handle_contact_shared))
-application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, fallback_message_handler))
+application.add_handler(MessageHandler(filters.CONTACT & ChatType.PRIVATE, handle_contact_shared))
+application.add_handler(MessageHandler(filters.TEXT & ChatType.PRIVATE, fallback_message_handler))
 
 # --- Flask Webhook Route ---
 @app.route('/webhook', methods=['POST'])
 async def webhook():
     """
     This is the Flask endpoint that Telegram sends updates to.
-    It receives the JSON update, creates a telegram.Update object, and processes it.
+    It receives the JSON update and passes it to application.run_webhook().
     """
     if request.method == "POST":
-        update_data = request.get_json()
-        if update_data:
-            update = Update.de_json(update_data, application.bot)
-            await application.process_update(update)
-        else:
-            logger.warning("Received empty or invalid JSON update.")
-        return jsonify({"status": "ok"}), 200
+        try:
+            # Get the raw JSON data from the request body
+            update_data_json = request.get_data().decode('utf-8')
+            logger.info(f"Received raw webhook update: {update_data_json[:200]}...") # Log first 200 chars
+
+            # Use application.update_queue to handle updates,
+            # and application.post_init to run initialization tasks like webhook setup
+            # This is the recommended way to integrate PTB Application with Flask webhooks.
+            # run_webhook handles creating the Update object and processing it.
+            await application.update_queue.put(Update.de_json(json.loads(update_data_json), application.bot))
+            # You *must* add the update to the queue and then let PTB's internal loop handle it.
+            # The actual processing happens in the background.
+
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            logger.error(f"Error processing webhook update: {e}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
     return jsonify({"status": "Method Not Allowed"}), 405
 
-# --- NEW: Flask Endpoint for Setting Webhook ---
+# --- Flask Endpoint for Setting Webhook ---
 @app.route('/set_webhook', methods=['GET'])
 async def set_webhook_route():
     """
@@ -263,7 +272,9 @@ async def set_webhook_route():
         logger.error(f"Failed to set Telegram webhook: {e}. Check your BOT_TOKEN and WEBHOOK_URL.")
         return jsonify({"status": "error", "message": f"Failed to set webhook: {e}"}), 500
 
-# --- Flask Server Startup (for local development only) ---
+# --- Flask Server Startup & PTB Application Running ---
+# This block runs only if the script is executed directly (e.g., `python your_bot.py`)
+# and is NOT used when Gunicorn serves the app on Render.
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN environment variable is not set. Bot cannot start locally.")
@@ -276,9 +287,33 @@ if __name__ == "__main__":
     except ValueError:
         print(f"WARNING: ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
 
-    logger.info(f"Flask app starting for local development on port {PORT}...")
-    # This `app.run()` only executes if the script is run directly (not via Gunicorn).
-    # Gunicorn handles the server startup on Render.
-    if not RENDER_EXTERNAL_HOSTNAME: # Only run Flask's dev server if not on Render
-         app.run(port=PORT, debug=False)
+    logger.info("Starting local development server with PTB Application...")
+
+    # Start the PTB Application in webhook mode for local testing.
+    # This manually runs a local HTTP server and passes updates to PTB.
+    # On Render, Gunicorn + Flask handles the HTTP server, and PTB processes updates
+    # directly from the /webhook route.
+    async def run_local_bot():
+        # Ensure webhook is clear for polling/local dev server
+        await application.bot.set_webhook(url="")
+        logger.info("Cleared any existing webhooks for local testing.")
+
+        # This will start a local server and process updates.
+        # This is for local development ONLY.
+        webserver_port = PORT # Use the configured port
+        logger.info(f"Local webserver for PTB starting on port {webserver_port}...")
+        await application.run_webhook(
+            listen="0.0.0.0", # Listen on all interfaces
+            port=webserver_port,
+            url_path="/webhook", # Path where Telegram sends updates
+            webhook_url=WEBHOOK_URL # The full URL Telegram should call
+        )
+
+    # Run the local bot in an asyncio event loop
+    try:
+        asyncio.run(run_local_bot())
+    except KeyboardInterrupt:
+        logger.info("Local bot stopped by user.")
+    except Exception as e:
+        logger.error(f"Error running local bot: {e}", exc_info=True)
 
