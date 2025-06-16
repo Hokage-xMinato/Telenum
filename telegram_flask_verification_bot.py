@@ -3,13 +3,15 @@
 import os
 import logging
 import json
-import asyncio # Keep asyncio for handlers, but remove direct startup calls
+import asyncio
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, ChatJoinRequestHandler, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
+# Import ChatType specifically
+from telegram.ext.filters import ChatType # Explicitly import ChatType
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -40,7 +42,6 @@ PORT = int(os.getenv("PORT", 5000))
 app = Flask(__name__)
 
 # --- python-telegram-bot Application Setup ---
-# Initialize the Application without directly running set_webhook here.
 application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
 
 # Dictionary to store pending join requests awaiting verification.
@@ -217,8 +218,9 @@ async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT
 # --- Register Handlers with python-telegram-bot Application ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(ChatJoinRequestHandler(handle_join_request))
-application.add_handler(MessageHandler(filters.CONTACT & filters.PRIVATE, handle_contact_shared))
-application.add_handler(MessageHandler(filters.TEXT & filters.PRIVATE, fallback_message_handler))
+# Corrected filter: filters.ChatType.PRIVATE
+application.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, handle_contact_shared))
+application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, fallback_message_handler))
 
 # --- Flask Webhook Route ---
 @app.route('/webhook', methods=['POST'])
