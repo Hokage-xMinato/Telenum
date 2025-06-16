@@ -3,6 +3,7 @@
 import os
 import logging
 import json
+import asyncio # Import asyncio for managing the event loop
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -23,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration Variables ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# Admin chat ID where verification details will be sent.
-# Make sure this is set in your .env file or Render's environment variables.
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 # Determine WEBHOOK_URL based on Render environment or .env
@@ -32,9 +31,8 @@ RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if RENDER_EXTERNAL_HOSTNAME:
     WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
 else:
-    # Fallback for local development or if not on Render
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://127.0.0.1:5000/webhook")
-    logger.warning("RENDER_EXTERNAL_HOSTNAME not found, falling back to WEBHOOK_URL from .env or default.")
+    logger.warning("RENDER_EXTERNAL_HOSTNAME not found, falling back to WEBHOOK_URL from .env or default for local testing.")
 
 PORT = int(os.getenv("PORT", 5000))
 
@@ -132,22 +130,19 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
             group_name = original_join_request.chat.title
 
             try:
-                # Approve the original join request
                 await original_join_request.approve()
                 logger.info(
                     f"Approved join request for user '{user.full_name}' (ID: {user.id}) "
                     f"to group '{group_name}' after successful phone verification."
                 )
 
-                # Send confirmation to the user
                 await message.reply_text(
                     f"Thank you for verifying! Your request to join '{group_name}' has been approved. "
                     "You are all set! You can now access the group.",
                     reply_markup=ReplyKeyboardRemove()
                 )
 
-                # --- NEW: Send verified user details to the ADMIN_CHAT_ID ---
-                if ADMIN_CHAT_ID: # Check if ADMIN_CHAT_ID is set
+                if ADMIN_CHAT_ID:
                     admin_notification_text = (
                         f"✅ **New User Verified and Joined!**\n"
                         f"**Group:** {group_name}\n"
@@ -155,13 +150,13 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
                         f"**Name:** {user.full_name}\n"
                         f"**Username:** @{user.username if user.username else 'N/A'}\n"
                         f"**Phone:** `{phone_number}`\n"
-                        f"[View User Profile](tg://user?id={user.id})" # Link to user's profile
+                        f"[View User Profile](tg://user?id={user.id})"
                     )
                     try:
                         await context.bot.send_message(
                             chat_id=ADMIN_CHAT_ID,
                             text=admin_notification_text,
-                            parse_mode=ParseMode.MARKDOWN_V2 # Use MarkdownV2 for bold and links
+                            parse_mode=ParseMode.MARKDOWN_V2
                         )
                         logger.info(f"Sent verification notification to admin chat {ADMIN_CHAT_ID} for user {user.id}.")
                     except Exception as admin_notify_error:
@@ -237,43 +232,62 @@ async def webhook():
         return jsonify({"status": "ok"}), 200
     return jsonify({"status": "Method Not Allowed"}), 405
 
-# --- Flask Server Startup & Webhook Setup ---
-if __name__ == "__main__":
+# --- GLOBAL WEBHOOK SETUP (Crucial for Gunicorn deployment) ---
+# This async function will set the webhook.
+# It runs when the module is first imported by Gunicorn.
+async def setup_webhook_if_needed():
     if not BOT_TOKEN:
-        print("CRITICAL ERROR: Please set your TELEGRAM_BOT_TOKEN environment variable.")
-        exit(1)
+        logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Bot cannot start.")
+        # In a production environment, you might want to raise an exception to halt deployment.
+        # raise ValueError("TELEGRAM_BOT_TOKEN not set")
+        return # Exit early if token is missing
 
-    # Validate ADMIN_CHAT_ID
     if not ADMIN_CHAT_ID:
-        print("WARNING: ADMIN_CHAT_ID environment variable is not set. Admin notifications will be skipped.")
+        logger.warning("ADMIN_CHAT_ID environment variable is not set. Admin notifications will be skipped.")
     try:
-        # Attempt to convert to int to catch non-numeric IDs early
         _ = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
     except ValueError:
-        print(f"WARNING: ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
+        logger.warning(f"ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
 
-
-    # This logic automatically sets the webhook URL for Render deployments.
-    # For local development, ensure WEBHOOK_URL is set in .env if not using ngrok.
     if WEBHOOK_URL and RENDER_EXTERNAL_HOSTNAME:
-        import asyncio
+        logger.info(f"Attempting to set Telegram webhook to: {WEBHOOK_URL}")
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        loop.run_until_complete(
-            application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-        )
-        logger.info(f"Telegram webhook set to: {WEBHOOK_URL}")
-    elif not RENDER_EXTERNAL_HOSTNAME:
-        print("Not on Render, or RENDER_EXTERNAL_HOSTNAME not available. Please ensure webhook is set manually if needed.")
-        print(f"For local testing, Flask app will run on port {PORT}. Use ngrok to expose it.")
+            # Clear any old webhooks
+            await application.bot.set_webhook(url="")
+            # Set the new webhook
+            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+            logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
+        except Exception as e:
+            logger.error(f"Failed to set Telegram webhook: {e}. Check your BOT_TOKEN and WEBHOOK_URL.")
+            # This is a critical error, likely means the bot won't receive updates.
+            # You might want to crash the application if this fails in production.
+            # raise RuntimeError(f"Webhook setup failed: {e}")
+    else:
+        logger.info("Not on Render, or RENDER_EXTERNAL_HOSTNAME not available. Skipping automatic webhook setup.")
+        logger.info("For local testing, ensure you manually expose your Flask app (e.g., with ngrok) "
+                    "and set the webhook via a separate script or curl if needed.")
 
-    logger.info(f"Flask app starting on port {PORT}...")
-    # When deployed on Render (or other WSGI servers), Gunicorn will handle app.run()
-    # For local testing directly with `python script.py`, this `app.run()` is needed.
-    if not RENDER_EXTERNAL_HOSTNAME:
+# Execute webhook setup when the module is loaded (e.g., by Gunicorn)
+# This handles running an async function in a sync context at startup.
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError: # This handles cases where no event loop is currently running
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+# Check if the loop is already running before trying to run_until_complete
+# This prevents an error if gevent itself has already started the loop.
+if not loop.is_running():
+    loop.run_until_complete(setup_webhook_if_needed())
+else:
+    logger.warning("Event loop is already running. Webhook setup might have been attempted elsewhere "
+                   "or needs a different synchronization method. Ensure webhook is properly configured.")
+
+# --- Flask Server Startup (for local development only) ---
+if __name__ == "__main__":
+    logger.info(f"Flask app starting for local development on port {PORT}...")
+    # This `app.run()` only executes if the script is run directly (not via Gunicorn).
+    # Gunicorn handles the server startup on Render.
+    if not RENDER_EXTERNAL_HOSTNAME: # Only run Flask's dev server if not on Render
          app.run(port=PORT, debug=False)
 
