@@ -1,5 +1,5 @@
 Flask
-python-telegram-bot==20.x
+python-telegram-bot==20.0
 python-dotenv
 gunicorn
 gevent
