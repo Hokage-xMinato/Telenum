@@ -226,23 +226,23 @@ async def post_init_callback(application_instance: Application) -> None:
     Used to set the Telegram webhook automatically.
     """
     logger.info("DEBUG: post_init_callback CALLED! This means the function reference was valid.")
-    # Temporarily comment out the webhook logic to isolate the issue
-    # if not BOT_TOKEN:
-    #     logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
-    #     return
-    # if not WEBHOOK_URL:
-    #     logger.critical("WEBHOOK_URL not determined. Cannot set webhook automatically.")
-    #     return
-    # try:
-    #     # Clear any old webhooks first to avoid conflicts
-    #     await application_instance.bot.set_webhook(url="")
-    #     logger.info("Cleared any old webhooks successfully.")
+    
+    if not BOT_TOKEN:
+        logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
+        return
+    if not WEBHOOK_URL:
+        logger.critical("WEBHOOK_URL not determined. Cannot set webhook automatically.")
+        return
+    try:
+        # Clear any old webhooks first to avoid conflicts
+        await application_instance.bot.set_webhook(url="")
+        logger.info("Cleared any old webhooks successfully.")
 
-    #     # Set the new webhook
-    #     await application_instance.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-    #     logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
-    # except Exception as e:
-    #     logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
+        # Set the new webhook
+        await application_instance.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
 
 async def post_shutdown_callback(application_instance: Application) -> None:
     """
@@ -267,15 +267,36 @@ def create_application() -> Application:
         logger.critical("BOT_TOKEN is not set. Cannot create PTB Application.")
         raise ValueError("BOT_TOKEN is not set. Please configure it in environment variables.")
 
+    logger.info(f"DEBUG: BOT_TOKEN (first 5 chars): {BOT_TOKEN[:5] if BOT_TOKEN else 'None'}") # Log part of token for sanity
+
     # Build the application instance
     ptb_application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
+    
+    # --- IMPORTANT FIX: Explicitly set the asyncio event loop ---
+    # This is often necessary when running with WSGI servers like Gunicorn
+    # that manage their own threading/process models, which can interfere
+    # with asyncio's default loop management.
+    ptb_application.loop = asyncio.get_event_loop()
+    logger.info(f"DEBUG: Explicitly set ptb_application.loop to: {ptb_application.loop}")
 
-    # Diagnostic prints BEFORE the problematic line
+    # Diagnostic prints for ptb_application itself
+    logger.info(f"DEBUG: After build, type(ptb_application): {type(ptb_application)}")
+    logger.info(f"DEBUG: After build, ptb_application is: {ptb_application}")
+
+    # Explicitly check if post_init exists on the built object
+    if not hasattr(ptb_application, 'post_init') or not callable(ptb_application.post_init):
+        logger.critical(f"CRITICAL ERROR: ptb_application does not have a callable 'post_init' method. "
+                        f"Type of ptb_application: {type(ptb_application)}. Value: {ptb_application}. "
+                        f"Is post_init callable? {callable(getattr(ptb_application, 'post_init', None))}")
+        raise RuntimeError("Failed to build a valid PTB Application instance with 'post_init' method.")
+
+
+    # Diagnostic prints for post_init_callback (already verified, but keep for clarity)
     logger.info(f"DEBUG: Before post_init, type(post_init_callback): {type(post_init_callback)}")
     logger.info(f"DEBUG: Before post_init, post_init_callback is: {post_init_callback}")
 
     # Register the lifecycle callbacks
-    ptb_application.post_init(post_init_callback) # This is likely line 277
+    ptb_application.post_init(post_init_callback) # This is likely line 278, should now work
     ptb_application.post_shutdown(post_shutdown_callback)
 
     # Register handlers
