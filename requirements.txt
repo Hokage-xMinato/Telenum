@@ -1,6 +1,4 @@
 Flask==3.0.3
-python-telegram-bot==21.2
+python-telegram-bot[callback-data]==21.2  # <--- CHANGE THIS LINE
 python-dotenv==1.0.1
-# You might want to pin the exact versions that work for you.
-# These are recent stable versions at the time of writing.
 gunicorn==22.0.0
