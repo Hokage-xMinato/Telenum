@@ -20,7 +20,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING) # Suppress httpx library warnings
 logger = logging.getLogger(__name__)
 
 # --- Configuration Variables (Global for easy access by Flask routes) ---
@@ -36,17 +36,20 @@ else:
 
 PORT = int(os.getenv("PORT", 5000))
 
+# --- Initialize Flask Application ---
+# THIS WAS THE MISSING LINE
+app = Flask(__name__)
+
 # --- Global Application Instance (will be initialized by create_application) ---
-# Initialize as None, then populate in create_application function
 application = None 
 
 # Dictionary to store pending join requests awaiting verification.
 pending_join_requests = {}
 
 # --- Telegram Bot Handlers (Logic) ---
-# These functions remain mostly the same, as they are now used by the `application` object.
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /start command in private chats."""
     user = update.effective_user
     if user:
         await update.message.reply_html(
@@ -58,6 +61,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Received start command without effective user.")
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles new chat join requests."""
     chat_join_request = update.chat_join_request
     user = chat_join_request.from_user
     chat = chat_join_request.chat
@@ -67,7 +71,8 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"from user '{user.full_name}' (ID: {user.id}). Storing for verification."
     )
 
-    pending_join_requests[user.id] = chat_join_request
+    # Store the full ChatJoinRequest object, as it's needed for approval later
+    pending_join_requests[user.id] = chat_join_request 
 
     keyboard = [
         [KeyboardButton("I am not a bot", request_contact=True)]
@@ -95,13 +100,16 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"Sent verification prompt to user {user.id} in DM for chat '{chat.title}'.")
     except Exception as e:
         logger.error(
-            f"Failed to send verification prompt to user {user.id}. Error: {e}"
+            f"Failed to send verification prompt to user {user.id} for chat '{chat.title}'. "
+            f"Error: {e}. Removing from pending requests.",
+            exc_info=True # Log full traceback
         )
         if user.id in pending_join_requests:
             del pending_join_requests[user.id]
 
 
 async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the contact shared by the user for verification."""
     message = update.message
     user = message.from_user
     contact = message.contact
@@ -115,7 +123,7 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
         if user.id in pending_join_requests:
-            original_join_request = pending_join_requests.pop(user.id)
+            original_join_request = pending_join_requests.pop(user.id) # Remove from pending
             group_name = original_join_request.chat.title
 
             try:
@@ -128,20 +136,29 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
                 await message.reply_text(
                     f"Thank you for verifying! Your request to join '{group_name}' has been approved. "
                     "You are all set! You can now access the group.",
-                    reply_markup=ReplyKeyboardRemove()
+                    reply_markup=ReplyKeyboardRemove() # Remove the keyboard
                 )
 
                 if ADMIN_CHAT_ID:
-                    admin_notification_text = (
-                        f"✅ **New User Verified and Joined!**\n"
-                        f"**Group:** {group_name}\n"
-                        f"**User ID:** `{user.id}`\n"
-                        f"**Name:** {user.full_name}\n"
-                        f"**Username:** @{user.username if user.username else 'N/A'}\n"
-                        f"**Phone:** `{phone_number}`\n"
-                        f"[View User Profile](tg://user?id={user.id})"
-                    )
                     try:
+                        # MarkdownV2 requires escaping specific characters
+                        escaped_group_name = group_name.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[') \
+                                                     .replace('`', '\\`').replace('.', '\\.').replace('!', '\\!') \
+                                                     .replace('(', '\\(').replace(')', '\\)').replace('-', '\\-') \
+                                                     .replace('~', '\\~').replace('>', '\\>').replace('#', '\\#') \
+                                                     .replace('+', '\\+').replace('=', '\\=').replace('|', '\\|') \
+                                                     .replace('{', '\\{').replace('}', '\\}').replace('.', '\\.')
+                        escaped_user_full_name = user.full_name.replace('_', '\\_').replace('*', '\\*')
+
+                        admin_notification_text = (
+                            f"✅ \\*\\*New User Verified and Joined\\!\\*\\*\n"
+                            f"\\*\\*Group:\\*\\* {escaped_group_name}\n"
+                            f"\\*\\*User ID:\\*\\* `{user.id}`\n"
+                            f"\\*\\*Name:\\*\\* {escaped_user_full_name}\n"
+                            f"\\*\\*Username:\\*\\* @{user.username if user.username else 'N/A'}\n"
+                            f"\\*\\*Phone:\\*\\* `{phone_number}`\n"
+                            f"[View User Profile](tg://user?id={user.id})"
+                        )
                         await context.bot.send_message(
                             chat_id=ADMIN_CHAT_ID,
                             text=admin_notification_text,
@@ -149,14 +166,14 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
                         )
                         logger.info(f"Sent verification notification to admin chat {ADMIN_CHAT_ID} for user {user.id}.")
                     except Exception as admin_notify_error:
-                        logger.error(f"Failed to send admin notification for user {user.id}: {admin_notify_error}")
+                        logger.error(f"Failed to send admin notification for user {user.id}: {admin_notify_error}", exc_info=True)
                 else:
                     logger.warning("ADMIN_CHAT_ID not set, skipping admin notification.")
 
             except Exception as e:
                 logger.error(
                     f"Failed to approve join request for user {user.id} to group '{group_name}' "
-                    f"after verification. Error: {e}"
+                    f"after verification. Error: {e}", exc_info=True
                 )
                 await message.reply_text(
                     f"Verification successful, but I encountered an issue approving your request to join '{group_name}'. "
@@ -183,25 +200,30 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles any other text messages in private chat."""
     user = update.effective_user
-    if user and user.id in pending_join_requests:
-        await update.message.reply_text(
-            "Please complete the verification by tapping the 'I am not a bot' button. "
-            "If you don't see it, it might have disappeared; you can type /start or "
-            "re-send your group join request to receive the button again.",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton("I am not a bot", request_contact=True)]],
-                one_time_keyboard=True, resize_keyboard=True
+    if user and update.message and update.message.text: # Ensure message and text exist
+        if user.id in pending_join_requests:
+            await update.message.reply_text(
+                "Please complete the verification by tapping the 'I am not a bot' button. "
+                "If you don't see it, it might have disappeared; you can type /start or "
+                "re-send your group join request to receive the button again.",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("I am not a bot", request_contact=True)]],
+                    one_time_keyboard=True, resize_keyboard=True
+                )
             )
-        )
+        else:
+            await update.message.reply_text("Hello! I'm here to help with group join requests. How can I assist you?")
     elif user:
-        await update.message.reply_text("Hello! I'm here to help with group join requests. How can I assist you?")
+        logger.warning(f"Received a non-text message from user {user.id} in fallback handler.")
+        await update.message.reply_text("I can only process text messages and contact shares. Please use the provided buttons.")
     else:
         logger.warning("Received a message without effective user in fallback handler.")
 
 # --- Callbacks for Application Lifecycle ---
 
-async def post_init_callback(application_instance: Application) -> None: # Renamed param for clarity
+async def post_init_callback(application_instance: Application) -> None:
     """
     Callback function that runs once after the Application has been initialized.
     Used to set the Telegram webhook automatically.
@@ -226,7 +248,7 @@ async def post_init_callback(application_instance: Application) -> None: # Renam
     except Exception as e:
         logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
 
-async def post_shutdown_callback(application_instance: Application) -> None: # Renamed param for clarity
+async def post_shutdown_callback(application_instance: Application) -> None:
     """
     Callback function that runs once before the Application shuts down.
     Used to clear the Telegram webhook. (Good practice for clean shutdowns)
@@ -240,10 +262,10 @@ async def post_shutdown_callback(application_instance: Application) -> None: # R
 
 
 # --- Function to Create and Configure the PTB Application ---
-# This is the "factory" function that Gunicorn will call implicitly.
 def create_application() -> Application:
     """
     Creates and configures the python-telegram-bot Application instance.
+    This is the "factory" function that Gunicorn will call implicitly when running.
     """
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN is not set. Cannot create PTB Application.")
@@ -259,33 +281,41 @@ def create_application() -> Application:
     # Register handlers
     ptb_application.add_handler(CommandHandler("start", start))
     ptb_application.add_handler(ChatJoinRequestHandler(handle_join_request))
+    # Filter for private chats to ensure contact sharing is handled in DM
     ptb_application.add_handler(MessageHandler(filters.CONTACT & ChatType.PRIVATE, handle_contact_shared))
+    # Fallback for any other text messages in private chat
     ptb_application.add_handler(MessageHandler(filters.TEXT & ChatType.PRIVATE, fallback_message_handler))
 
     return ptb_application
 
 # Initialize the global application instance
-# This is called once when the module is loaded by Gunicorn.
+# This is called once when the module is loaded by Gunicorn/Flask.
 application = create_application()
 
 
 # --- Flask Webhook Route ---
 @app.route('/webhook', methods=['POST'])
 async def webhook():
+    """Endpoint for Telegram to send updates."""
     if request.method == "POST":
         try:
             update_data_json = request.get_data().decode('utf-8')
             # Use the global 'application' instance here
+            # The PTB application's update_queue will handle the update processing
             await application.update_queue.put(Update.de_json(json.loads(update_data_json), application.bot))
             return jsonify({"status": "ok"}), 200
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in webhook request: {e}", exc_info=True)
+            return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
         except Exception as e:
             logger.error(f"Error processing webhook update: {e}", exc_info=True)
             return jsonify({"status": "error", "message": str(e)}), 500
-    return jsonify({"status": "Method Not Allowed"}), 405
+    return jsonify({"status": "Method Not Allowed"}), 405 # Should not be reached with POST only
 
 # --- Optional: Root Route for Flask (for health checks) ---
 @app.route('/', methods=['GET'])
 def root_route():
+    """Simple health check endpoint."""
     status_message = "Telegram Bot Webhook Listener is Live and Operational!"
     logger.info(f"Root route accessed. Status: {status_message}")
     return status_message, 200
@@ -298,25 +328,30 @@ if __name__ == "__main__":
     
     if not ADMIN_CHAT_ID:
         print("WARNING: ADMIN_CHAT_ID environment variable is not set. Admin notifications will be skipped.")
-    try:
-        _ = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
-    except ValueError:
-        print(f"WARNING: ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
+    else:
+        try:
+            _ = int(ADMIN_CHAT_ID) # Validate if it's an integer
+        except ValueError:
+            print(f"WARNING: ADMIN_CHAT_ID '{ADMIN_CHAT_ID}' is not a valid integer. Admin notifications may fail.")
 
     logger.info("Starting local development server with PTB Application...")
 
     async def run_local_webhook_server():
-        # Use the global 'application' instance created by create_application()
+        # Ensure webhook is cleared before starting local PTB webhook server
+        # This prevents conflicts with any previously set remote webhooks
         await application.bot.set_webhook(url="")
         logger.info("Cleared any existing webhooks for local testing.")
 
         webserver_port = PORT
         logger.info(f"Local webserver for PTB starting on port {webserver_port}...")
+        
+        # When running locally, PTB's run_webhook will start its own Flask server
+        # It takes care of integrating with Flask under the hood when called this way.
         await application.run_webhook(
             listen="0.0.0.0",
             port=webserver_port,
-            url_path="/webhook",
-            webhook_url=WEBHOOK_URL
+            url_path="/webhook", # The path Telegram sends updates to
+            webhook_url=WEBHOOK_URL # The public URL Telegram should use
         )
 
     try:
@@ -325,4 +360,3 @@ if __name__ == "__main__":
         logger.info("Local bot stopped by user.")
     except Exception as e:
         logger.error(f"Error running local bot: {e}", exc_info=True)
-
