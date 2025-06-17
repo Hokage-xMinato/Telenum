@@ -1,1 +1,1 @@
-web: gunicorn --worker-class gevent -w 1 telegram_flask_verification_bot:app
+web: gunicorn --bind 0.0.0.0:$PORT telegram_flask_verification_bot:app
