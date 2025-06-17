@@ -3,3 +3,4 @@ python-telegram-bot==21.2
 python-dotenv==1.0.1
 # You might want to pin the exact versions that work for you.
 # These are recent stable versions at the time of writing.
+gunicorn==22.0.0
