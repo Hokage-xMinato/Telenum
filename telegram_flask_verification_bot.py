@@ -219,6 +219,43 @@ async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT
     else:
         logger.warning("Received a message without effective user in fallback handler.")
 
+# --- Callbacks for Application Lifecycle ---
+async def post_init_callback(application_instance: Application) -> None:
+    """
+    Callback function that runs once after the Application has been initialized.
+    Used to set the Telegram webhook automatically.
+    """
+    logger.info("DEBUG: post_init_callback CALLED! This means the function reference was valid.")
+    # Temporarily comment out the webhook logic to isolate the issue
+    # if not BOT_TOKEN:
+    #     logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
+    #     return
+    # if not WEBHOOK_URL:
+    #     logger.critical("WEBHOOK_URL not determined. Cannot set webhook automatically.")
+    #     return
+    # try:
+    #     # Clear any old webhooks first to avoid conflicts
+    #     await application_instance.bot.set_webhook(url="")
+    #     logger.info("Cleared any old webhooks successfully.")
+
+    #     # Set the new webhook
+    #     await application_instance.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+    #     logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
+    # except Exception as e:
+    #     logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
+
+async def post_shutdown_callback(application_instance: Application) -> None:
+    """
+    Callback function that runs once before the Application shuts down.
+    Used to clear the Telegram webhook. (Good practice for clean shutdowns)
+    """
+    logger.info("DEBUG: post_shutdown_callback CALLED!")
+    try:
+        await application_instance.bot.set_webhook(url="")
+        logger.info("Telegram webhook cleared successfully on shutdown.")
+    except Exception as e:
+        logger.error(f"Failed to clear Telegram webhook in post_shutdown: {e}", exc_info=True)
+
 
 # --- Function to Create and Configure the PTB Application ---
 def create_application() -> Application:
@@ -230,52 +267,16 @@ def create_application() -> Application:
         logger.critical("BOT_TOKEN is not set. Cannot create PTB Application.")
         raise ValueError("BOT_TOKEN is not set. Please configure it in environment variables.")
 
-    # --- Callbacks for Application Lifecycle (MOVED INSIDE HERE) ---
-    # These are now defined locally within create_application
-    async def post_init_callback_local(application_instance: Application) -> None:
-        """
-        Callback function that runs once after the Application has been initialized.
-        Used to set the Telegram webhook automatically.
-        """
-        logger.info("Running post_init_callback: Setting Telegram webhook...")
-        if not BOT_TOKEN:
-            logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
-            return
-
-        if not WEBHOOK_URL:
-            logger.critical("WEBHOOK_URL not determined. Cannot set webhook automatically.")
-            return
-
-        try:
-            # Clear any old webhooks first to avoid conflicts
-            await application_instance.bot.set_webhook(url="")
-            logger.info("Cleared any old webhooks successfully.")
-
-            # Set the new webhook
-            await application_instance.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-            logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
-        except Exception as e:
-            logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
-
-    async def post_shutdown_callback_local(application_instance: Application) -> None:
-        """
-        Callback function that runs once before the Application shuts down.
-        Used to clear the Telegram webhook. (Good practice for clean shutdowns)
-        """
-        logger.info("Running post_shutdown_callback: Clearing Telegram webhook...")
-        try:
-            await application_instance.bot.set_webhook(url="")
-            logger.info("Telegram webhook cleared successfully on shutdown.")
-        except Exception as e:
-            logger.error(f"Failed to clear Telegram webhook in post_shutdown: {e}", exc_info=True)
-
-
     # Build the application instance
     ptb_application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
 
-    # Register the lifecycle callbacks using the local definitions
-    ptb_application.post_init(post_init_callback_local)
-    ptb_application.post_shutdown(post_shutdown_callback_local)
+    # Diagnostic prints BEFORE the problematic line
+    logger.info(f"DEBUG: Before post_init, type(post_init_callback): {type(post_init_callback)}")
+    logger.info(f"DEBUG: Before post_init, post_init_callback is: {post_init_callback}")
+
+    # Register the lifecycle callbacks
+    ptb_application.post_init(post_init_callback) # This is likely line 277
+    ptb_application.post_shutdown(post_shutdown_callback)
 
     # Register handlers
     ptb_application.add_handler(CommandHandler("start", start))
