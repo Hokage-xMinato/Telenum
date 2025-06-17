@@ -219,13 +219,12 @@ async def fallback_message_handler(update: Update, context: ContextTypes.DEFAULT
     else:
         logger.warning("Received a message without effective user in fallback handler.")
 
-# --- Callbacks for Application Lifecycle ---
-async def post_init_callback(application_instance: Application) -> None:
+# --- Webhook Setup Function ---
+async def _set_webhook_on_startup(application_instance: Application) -> None:
     """
-    Callback function that runs once after the Application has been initialized.
-    Used to set the Telegram webhook automatically.
+    Sets the Telegram webhook. This will be scheduled to run after Application creation.
     """
-    logger.info("DEBUG: post_init_callback CALLED! This means the function reference was valid.")
+    logger.info("DEBUG: _set_webhook_on_startup CALLED!")
     
     if not BOT_TOKEN:
         logger.critical("TELEGRAM_BOT_TOKEN environment variable is not set. Cannot set webhook.")
@@ -242,12 +241,21 @@ async def post_init_callback(application_instance: Application) -> None:
         await application_instance.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
         logger.info(f"Telegram webhook successfully set to: {WEBHOOK_URL}")
     except Exception as e:
-        logger.error(f"Failed to set Telegram webhook in post_init: {e}", exc_info=True)
+        logger.error(f"Failed to set Telegram webhook in _set_webhook_on_startup: {e}", exc_info=True)
+
+
+# --- Callbacks for Application Lifecycle (keeping post_init minimal now) ---
+async def post_init_callback(application_instance: Application) -> None:
+    """
+    Callback function that runs once after the Application has been initialized.
+    No longer used for webhook setup directly.
+    """
+    logger.info("DEBUG: post_init_callback CALLED (as a general hook, not for webhook setup).")
 
 async def post_shutdown_callback(application_instance: Application) -> None:
     """
     Callback function that runs once before the Application shuts down.
-    Used to clear the Telegram webhook. (Good practice for clean shutdowns)
+    Used to clear the Telegram webhook.
     """
     logger.info("DEBUG: post_shutdown_callback CALLED!")
     try:
@@ -267,44 +275,70 @@ def create_application() -> Application:
         logger.critical("BOT_TOKEN is not set. Cannot create PTB Application.")
         raise ValueError("BOT_TOKEN is not set. Please configure it in environment variables.")
 
-    logger.info(f"DEBUG: BOT_TOKEN (first 5 chars): {BOT_TOKEN[:5] if BOT_TOKEN else 'None'}") # Log part of token for sanity
+    logger.info(f"DEBUG: BOT_TOKEN (first 5 chars): {BOT_TOKEN[:5] if BOT_TOKEN else 'None'}")
 
     # Build the application instance
     ptb_application = Application.builder().token(BOT_TOKEN).arbitrary_callback_data(True).build()
     
-    # --- IMPORTANT FIX: Explicitly set the asyncio event loop ---
-    # This is often necessary when running with WSGI servers like Gunicorn
-    # that manage their own threading/process models, which can interfere
-    # with asyncio's default loop management.
-    ptb_application.loop = asyncio.get_event_loop()
+    # --- Ensure an event loop is running for the application ---
+    # This is crucial for async operations within the Flask/Gunicorn context.
+    try:
+        # Try to get the running loop if one exists
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # If no loop is running, create a new one (common in multi-threaded/multi-process setups like Gunicorn)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    ptb_application.loop = loop
     logger.info(f"DEBUG: Explicitly set ptb_application.loop to: {ptb_application.loop}")
 
-    # Diagnostic prints for ptb_application itself
-    logger.info(f"DEBUG: After build, type(ptb_application): {type(ptb_application)}")
-    logger.info(f"DEBUG: After build, ptb_application is: {ptb_application}")
+    # Explicitly check if post_init exists on the built object (for continued diagnosis)
+    post_init_attr = getattr(ptb_application, 'post_init', 'ATTRIBUTE_MISSING')
+    logger.info(f"DEBUG: Value of ptb_application.post_init attribute: {post_init_attr}")
+    logger.info(f"DEBUG: Type of ptb_application.post_init attribute: {type(post_init_attr)}")
 
-    # Explicitly check if post_init exists on the built object
     if not hasattr(ptb_application, 'post_init') or not callable(ptb_application.post_init):
-        logger.critical(f"CRITICAL ERROR: ptb_application does not have a callable 'post_init' method. "
+        logger.warning(f"WARNING: ptb_application does not have a callable 'post_init' method. "
                         f"Type of ptb_application: {type(ptb_application)}. Value: {ptb_application}. "
                         f"Is post_init callable? {callable(getattr(ptb_application, 'post_init', None))}")
-        raise RuntimeError("Failed to build a valid PTB Application instance with 'post_init' method.")
+        # We will not raise an error here as we are bypassing post_init for webhook setup.
+
+    # Register the minimal post_init and post_shutdown callbacks (optional now for webhook setup)
+    # Keeping them for general lifecycle hooks if PTB uses them internally for other purposes.
+    if callable(getattr(ptb_application, 'post_init', None)):
+        ptb_application.post_init(post_init_callback)
+    else:
+        logger.warning("Skipping ptb_application.post_init registration as method is not callable.")
+
+    if callable(getattr(ptb_application, 'post_shutdown', None)):
+        ptb_application.post_shutdown(post_shutdown_callback)
+    else:
+        logger.warning("Skipping ptb_application.post_shutdown registration as method is not callable.")
 
 
-    # Diagnostic prints for post_init_callback (already verified, but keep for clarity)
-    logger.info(f"DEBUG: Before post_init, type(post_init_callback): {type(post_init_callback)}")
-    logger.info(f"DEBUG: Before post_init, post_init_callback is: {post_init_callback}")
+    # --- SCHEDULE WEBHOOK SETUP DIRECTLY ---
+    # We schedule the webhook setup to run on the application's event loop
+    # using run_coroutine_threadsafe. This ensures it's handled asynchronously.
+    try:
+        # Create a Future and schedule the coroutine
+        future = asyncio.run_coroutine_threadsafe(
+            _set_webhook_on_startup(ptb_application),
+            ptb_application.loop # Use the application's dedicated loop
+        )
+        # You can optionally wait for the future to complete if you need
+        # to ensure webhook is set before returning from create_application,
+        # but for startup, scheduling is usually enough.
+        # future.result(timeout=10) # Wait for up to 10 seconds
+        logger.info("DEBUG: Webhook setup scheduled via run_coroutine_threadsafe.")
+    except Exception as e:
+        logger.error(f"Failed to schedule webhook setup: {e}", exc_info=True)
 
-    # Register the lifecycle callbacks
-    ptb_application.post_init(post_init_callback) # This is likely line 278, should now work
-    ptb_application.post_shutdown(post_shutdown_callback)
 
     # Register handlers
     ptb_application.add_handler(CommandHandler("start", start))
     ptb_application.add_handler(ChatJoinRequestHandler(handle_join_request))
-    # Filter for private chats to ensure contact sharing is handled in DM
     ptb_application.add_handler(MessageHandler(filters.CONTACT & ChatType.PRIVATE, handle_contact_shared))
-    # Fallback for any other text messages in private chat
     ptb_application.add_handler(MessageHandler(filters.TEXT & ChatType.PRIVATE, fallback_message_handler))
 
     return ptb_application
@@ -321,8 +355,6 @@ async def webhook():
     if request.method == "POST":
         try:
             update_data_json = request.get_data().decode('utf-8')
-            # Use the global 'application' instance here
-            # The PTB application's update_queue will handle the update processing
             await application.update_queue.put(Update.de_json(json.loads(update_data_json), application.bot))
             return jsonify({"status": "ok"}), 200
         except json.JSONDecodeError as e:
@@ -331,7 +363,7 @@ async def webhook():
         except Exception as e:
             logger.error(f"Error processing webhook update: {e}", exc_info=True)
             return jsonify({"status": "error", "message": str(e)}), 500
-    return jsonify({"status": "Method Not Allowed"}), 405 # Should not be reached with POST only
+    return jsonify({"status": "Method Not Allowed"}), 405
 
 # --- Optional: Root Route for Flask (for health checks) ---
 @app.route('/', methods=['GET'])
@@ -359,19 +391,16 @@ if __name__ == "__main__":
 
     async def run_local_webhook_server():
         # Ensure webhook is cleared before starting local PTB webhook server
-        # This prevents conflicts with any previously set remote webhooks
         await application.bot.set_webhook(url="")
         logger.info("Cleared any existing webhooks for local testing.")
 
         webserver_port = PORT
         logger.info(f"Local webserver for PTB starting on port {webserver_port}...")
         
-        # When running locally, PTB's run_webhook will start its own Flask server
-        # It takes care of integrating with Flask under the hood when called this way.
         await application.run_webhook(
             listen="0.0.0.0",
             port=webserver_port,
-            url_path="/webhook", # The path Telegram sends updates to
+            url_path="/webhook",
             webhook_url=WEBHOOK_URL
         )
 
